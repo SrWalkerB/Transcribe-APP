@@ -9,6 +9,61 @@ use serde::Serialize;
 use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager};
 
+/// Check if we're running inside an AppImage.
+fn is_appimage() -> bool {
+    std::env::var("APPIMAGE").is_ok()
+}
+
+/// Resolve a command by searching common installation paths (Homebrew, system, etc.)
+/// This is needed because GUI apps on macOS may not inherit the full shell PATH,
+/// and AppImage bundles its own binaries that may conflict with system ones.
+fn resolve_command(name: &str) -> String {
+    let extra_paths = [
+        "/opt/homebrew/bin",      // macOS Apple Silicon (Homebrew)
+        "/usr/local/bin",         // macOS Intel (Homebrew) / Linux
+        "/usr/bin",               // System default
+        "/snap/bin",              // Linux snap packages
+    ];
+
+    // Inside AppImage, skip paths that are inside the AppImage mount
+    let appdir = std::env::var("APPDIR").unwrap_or_default();
+
+    for dir in &extra_paths {
+        // If inside AppImage, make sure we're finding the REAL system binary
+        if !appdir.is_empty() && dir.starts_with("/usr") {
+            // Check the real system path, not the AppImage overlay
+            let real_path = format!("{}/{}", dir, name);
+            // Verify it's not inside the AppImage mount
+            if let Ok(canonical) = std::fs::canonicalize(&real_path) {
+                let canon_str = canonical.to_string_lossy();
+                if canon_str.contains(".mount_") || canon_str.starts_with(&appdir) {
+                    continue; // skip AppImage's bundled binary
+                }
+                return canonical.to_string_lossy().to_string();
+            }
+            continue;
+        }
+
+        let full = format!("{}/{}", dir, name);
+        if Path::new(&full).is_file() {
+            return full;
+        }
+    }
+    name.to_string() // fallback to PATH lookup
+}
+
+/// Create a Command that clears AppImage Python environment variables.
+/// AppImage sets PYTHONHOME/PYTHONPATH to its internal paths, which breaks
+/// the system Python's ability to find/install packages.
+fn python_command(python_bin: &str) -> Command {
+    let mut cmd = Command::new(python_bin);
+    if is_appimage() {
+        cmd.env_remove("PYTHONHOME");
+        cmd.env_remove("PYTHONPATH");
+    }
+    cmd
+}
+
 /// Em dev, tenta usar o Python do venv do backend (onde faster_whisper está instalado).
 fn backend_venv_python(script_path: &Path) -> Option<String> {
     let mut dir = script_path.parent()?;
@@ -20,6 +75,16 @@ fn backend_venv_python(script_path: &Path) -> Option<String> {
         dir = dir.parent()?;
     }
     None
+}
+
+/// Resolve Python: first try venv, then common paths.
+fn resolve_python(script_path: Option<&Path>) -> String {
+    if let Some(sp) = script_path {
+        if let Some(venv) = backend_venv_python(sp) {
+            return venv;
+        }
+    }
+    resolve_command("python3")
 }
 
 #[derive(Serialize)]
@@ -34,7 +99,8 @@ struct TranscribeProcess(Arc<Mutex<Option<Child>>>);
 
 #[tauri::command]
 fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
-    let ffmpeg = Command::new("ffmpeg")
+    let ffmpeg_bin = resolve_command("ffmpeg");
+    let ffmpeg = Command::new(&ffmpeg_bin)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -42,14 +108,13 @@ fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    let python_bin = app
+    let script_path = app
         .path()
         .resolve("resources/transcribe.py", BaseDirectory::Resource)
-        .ok()
-        .and_then(|p| backend_venv_python(&p))
-        .unwrap_or_else(|| "python3".to_string());
+        .ok();
+    let python_bin = resolve_python(script_path.as_deref());
 
-    let python = Command::new(&python_bin)
+    let python = python_command(&python_bin)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -58,7 +123,7 @@ fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
         .unwrap_or(false);
 
     let faster_whisper = if python {
-        Command::new(&python_bin)
+        python_command(&python_bin)
             .arg("-c")
             .arg("import faster_whisper")
             .stdout(std::process::Stdio::null())
@@ -78,15 +143,20 @@ fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
 }
 
 #[tauri::command]
-fn install_dependencies(app: tauri::AppHandle) -> Result<String, String> {
-    let python_bin = app
+async fn install_dependencies(app: tauri::AppHandle) -> Result<String, String> {
+    let script_path = app
         .path()
         .resolve("resources/transcribe.py", BaseDirectory::Resource)
-        .ok()
-        .and_then(|p| backend_venv_python(&p))
-        .unwrap_or_else(|| "python3".to_string());
+        .ok();
+    let python_bin = resolve_python(script_path.as_deref());
 
-    let python_ok = Command::new(&python_bin)
+    tokio::task::spawn_blocking(move || install_dependencies_blocking(&python_bin))
+        .await
+        .map_err(|e| format!("Erro interno: {}", e))?
+}
+
+fn install_dependencies_blocking(python_bin: &str) -> Result<String, String> {
+    let python_ok = python_command(python_bin)
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -101,28 +171,57 @@ fn install_dependencies(app: tauri::AppHandle) -> Result<String, String> {
         );
     }
 
-    let output = Command::new(&python_bin)
+    // Strategy 1: pip install --user (works on externally-managed environments)
+    let output = python_command(python_bin)
         .arg("-m")
         .arg("pip")
         .arg("install")
+        .arg("--user")
         .arg("faster-whisper")
         .output()
         .map_err(|e| format!("Falha ao executar pip: {}", e))?;
 
     if output.status.success() {
-        Ok("faster-whisper instalado com sucesso!".to_string())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "Falha ao instalar faster-whisper.\n\nTente manualmente: pip install faster-whisper\n\nDetalhe: {}",
-            stderr.lines().take(5).collect::<Vec<_>>().join("\n")
-        ))
+        return Ok("faster-whisper instalado com sucesso!".to_string());
     }
+
+    // Strategy 2: pip install --break-system-packages (fallback for strict environments)
+    let output2 = python_command(python_bin)
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--break-system-packages")
+        .arg("faster-whisper")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip: {}", e))?;
+
+    if output2.status.success() {
+        return Ok("faster-whisper instalado com sucesso!".to_string());
+    }
+
+    // Strategy 3: pipx install (if pipx is available)
+    let pipx_result = Command::new("pipx")
+        .arg("install")
+        .arg("faster-whisper")
+        .output();
+
+    if let Ok(pipx_out) = pipx_result {
+        if pipx_out.status.success() {
+            return Ok("faster-whisper instalado com sucesso via pipx!".to_string());
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "Falha ao instalar faster-whisper.\n\nTente manualmente:\n  pip install --user faster-whisper\n  ou: pipx install faster-whisper\n\nDetalhe: {}",
+        stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+    ))
 }
 
 #[tauri::command]
 fn get_video_duration(path: String) -> Result<f64, String> {
-    let output = Command::new("ffprobe")
+    let ffprobe_bin = resolve_command("ffprobe");
+    let output = Command::new(&ffprobe_bin)
         .arg("-v")
         .arg("quiet")
         .arg("-show_entries")
@@ -209,7 +308,8 @@ fn transcribe_video_blocking(
 
     // Passo 1: ffmpeg vídeo -> MP3
     let _ = app.emit("transcribe-step", "audio");
-    let ffmpeg_out = Command::new("ffmpeg")
+    let ffmpeg_bin = resolve_command("ffmpeg");
+    let ffmpeg_out = Command::new(&ffmpeg_bin)
         .arg("-i")
         .arg(path)
         .arg("-b:a")
@@ -244,9 +344,9 @@ fn transcribe_video_blocking(
 
     // Passo 2: transcrição com Python (streaming)
     let _ = app.emit("transcribe-step", "text");
-    let python_bin = backend_venv_python(&script_path).unwrap_or_else(|| "python3".to_string());
+    let python_bin = resolve_python(Some(&script_path));
 
-    let mut child = Command::new(&python_bin)
+    let mut child = python_command(&python_bin)
         .arg(script_path_str)
         .arg(&mp3_name)
         .arg(mp3_path_str)
