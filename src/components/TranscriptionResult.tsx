@@ -4,10 +4,11 @@ import { useLang } from "../LangContext";
 interface TranscriptionResultProps {
   text: string;
   onReset: () => void;
+  onHistory: () => void;
   isPartial?: boolean;
 }
 
-export default function TranscriptionResult({ text, onReset, isPartial }: TranscriptionResultProps) {
+export default function TranscriptionResult({ text, onReset, onHistory, isPartial }: TranscriptionResultProps) {
   const { t } = useLang();
   const [copied, setCopied] = useState(false);
 
@@ -43,6 +44,14 @@ export default function TranscriptionResult({ text, onReset, isPartial }: Transc
           {isPartial ? t("result.partial") : t("result.title")}
         </h2>
         <div className="result-actions">
+          <button type="button" className="btn-icon" onClick={onHistory} title={t("history.button")}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <title>History icon</title>
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            <span>{t("history.button")}</span>
+          </button>
           <button type="button" className="btn-icon" onClick={handleCopy} title={t("result.copy")}>
             {copied ? (
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
