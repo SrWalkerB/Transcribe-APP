@@ -1,9 +1,8 @@
-import { useEffect, useState, type DragEvent } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useLang } from "../LangContext";
 
-const ACCEPTED_FORMATS = [".mp4", ".mkv", ".avi", ".mov", ".webm"];
 const ACCEPTED_EXTENSIONS = ["mp4", "mkv", "avi", "mov", "webm"];
 
 const MODEL_KEYS = [
@@ -22,16 +21,22 @@ interface SelectedVideo {
   duration?: number;
 }
 
+interface DroppedFile {
+  path: string;
+  displayName: string;
+  duration?: number;
+}
+
 interface VideoUploaderProps {
   onPathSelected: (path: string, model: string, threads: number) => void;
   isLoading: boolean;
+  droppedFile: DroppedFile | null;
+  dragOver: boolean;
 }
 
-export default function VideoUploader({ onPathSelected, isLoading }: VideoUploaderProps) {
+export default function VideoUploader({ onPathSelected, isLoading, droppedFile, dragOver }: VideoUploaderProps) {
   const { t } = useLang();
-  const [dragOver, setDragOver] = useState(false);
   const [selected, setSelected] = useState<SelectedVideo | null>(null);
-  const [dropWarning, setDropWarning] = useState(false);
   const [model, setModel] = useState("base");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [threads, setThreads] = useState(4);
@@ -44,33 +49,16 @@ export default function VideoUploader({ onPathSelected, isLoading }: VideoUpload
     });
   }, []);
 
-  function handleDragOver(e: DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(true);
-  }
-
-  function handleDragLeave(e: DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-  }
-
-  function handleDrop(e: DragEvent<HTMLDivElement>) {
-    e.preventDefault();
-    e.stopPropagation();
-    setDragOver(false);
-
-    const file = e.dataTransfer.files[0];
-    if (file && isValidVideo(file)) {
+  // When a file is dropped via Tauri native drag-drop
+  useEffect(() => {
+    if (droppedFile) {
       setSelected({
-        path: null,
-        displayName: file.name,
-        size: file.size,
+        path: droppedFile.path,
+        displayName: droppedFile.displayName,
+        duration: droppedFile.duration,
       });
-      setDropWarning(true);
     }
-  }
+  }, [droppedFile]);
 
   async function handleBrowseClick() {
     const result = await open({
@@ -87,26 +75,18 @@ export default function VideoUploader({ onPathSelected, isLoading }: VideoUpload
         // ffprobe not available, skip duration
       }
       setSelected({ path, displayName, duration });
-      setDropWarning(false);
-    }
-  }
 
-  function isValidVideo(file: File): boolean {
-    const ext = "." + file.name.split(".").pop()?.toLowerCase();
-    return ACCEPTED_FORMATS.includes(ext);
+    }
   }
 
   function handleTranscribe() {
     if (selected?.path) {
       onPathSelected(selected.path, model, threads);
-    } else if (selected) {
-      setDropWarning(true);
     }
   }
 
   function handleRemoveFile() {
     setSelected(null);
-    setDropWarning(false);
   }
 
   function formatDuration(seconds: number): string {
@@ -126,18 +106,10 @@ export default function VideoUploader({ onPathSelected, isLoading }: VideoUpload
 
   return (
     <div className="uploader-wrapper">
-      {dropWarning && !selected?.path && (
-        <p className="drop-warning" role="alert">
-          {t("upload.dropWarning")}
-        </p>
-      )}
       <div
         role="button"
         tabIndex={0}
         className={`drop-zone ${dragOver ? "drop-zone--active" : ""} ${selected ? "drop-zone--has-file" : ""}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
         onClick={() => !selected && handleBrowseClick()}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {

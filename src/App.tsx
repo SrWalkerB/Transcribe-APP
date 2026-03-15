@@ -1,22 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import VideoUploader from "./components/VideoUploader";
 import TranscriptionResult from "./components/TranscriptionResult";
-import DependencyCheck from "./components/DependencyCheck";
-import SettingsDropdown from "./components/SettingsDropdown";
+import TranscriptionHistory, { saveToHistory, type HistoryEntry } from "./components/TranscriptionHistory";
+import SettingsPage from "./components/SettingsPage";
 import { t as translate, type Lang } from "./i18n";
 import { LangContext } from "./LangContext";
 import "./App.css";
 
-type AppState = "checking" | "missing-deps" | "idle" | "loading" | "done" | "error";
+type AppState = "settings" | "idle" | "loading" | "done" | "error" | "history";
 type TranscribeStep = "audio" | "text" | null;
-
-interface DependencyStatus {
-  ffmpeg: boolean;
-  python: boolean;
-  faster_whisper: boolean;
-}
 
 interface ProgressPayload {
   progress: number;
@@ -25,15 +20,17 @@ interface ProgressPayload {
 }
 
 function App() {
-  const [state, setState] = useState<AppState>("checking");
+  const [state, setState] = useState<AppState>("settings");
+  const [isFirstRun, setIsFirstRun] = useState(true);
   const [step, setStep] = useState<TranscribeStep>(null);
   const [transcription, setTranscription] = useState("");
   const [error, setError] = useState("");
-  const [deps, setDeps] = useState<DependencyStatus | null>(null);
   const [progress, setProgress] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [detectedLang, setDetectedLang] = useState("");
   const [isPartial, setIsPartial] = useState(false);
+  const [droppedFile, setDroppedFile] = useState<{ path: string; displayName: string; duration?: number } | null>(null);
+  const [dragOver, setDragOver] = useState(false);
   const [lang, setLangState] = useState<Lang>(() => {
     return (localStorage.getItem("transcribe-lang") as Lang) || "pt-BR";
   });
@@ -83,26 +80,46 @@ function App() {
     }
   }, [liveText]);
 
+  // Tauri native drag-drop: provides actual file paths
+  const ACCEPTED_EXTENSIONS = ["mp4", "mkv", "avi", "mov", "webm"];
   useEffect(() => {
-    checkDeps();
-  }, []);
-
-  async function checkDeps() {
-    setState("checking");
-    try {
-      const status = await invoke<DependencyStatus>("check_dependencies");
-      setDeps(status);
-      if (status.ffmpeg && status.python && status.faster_whisper) {
-        setState("idle");
-      } else {
-        setState("missing-deps");
+    const webview = getCurrentWebview();
+    const unlisten = webview.onDragDropEvent(async (event) => {
+      if (event.payload.type === "over") {
+        setDragOver(true);
+      } else if (event.payload.type === "leave") {
+        setDragOver(false);
+      } else if (event.payload.type === "drop") {
+        setDragOver(false);
+        const paths = event.payload.paths;
+        if (paths.length > 0) {
+          const path = paths[0];
+          const ext = path.split(".").pop()?.toLowerCase() || "";
+          if (ACCEPTED_EXTENSIONS.includes(ext)) {
+            const displayName = path.replace(/^.*[/\\]/, "") || "video";
+            let duration: number | undefined;
+            try {
+              duration = await invoke<number>("get_video_duration", { path });
+            } catch { /* skip */ }
+            setDroppedFile({ path, displayName, duration });
+            // If we're not in idle, go to idle so uploader shows
+            if (state === "done" || state === "error") {
+              handleReset();
+            }
+          }
+        }
       }
-    } catch {
-      setState("idle");
-    }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [state]);
+
+  function handleSettingsContinue() {
+    setIsFirstRun(false);
+    setState("idle");
   }
 
   async function handlePathSelected(path: string, model: string, threads: number) {
+    const fileName = path.replace(/^.*[/\\]/, "") || "video";
     setState("loading");
     setStep(null);
     setError("");
@@ -120,6 +137,7 @@ function App() {
       setTranscription(result);
       setState("done");
       setStep(null);
+      saveToHistory({ fileName, text: result, model, isPartial: false });
     } catch (err) {
       const errStr = err instanceof Error ? err.message : String(err);
       if (errStr.startsWith("__CANCELLED__")) {
@@ -128,6 +146,7 @@ function App() {
           setTranscription(partialText);
           setIsPartial(true);
           setState("done");
+          saveToHistory({ fileName, text: partialText, model, isPartial: true });
         } else {
           setState("idle");
         }
@@ -154,6 +173,12 @@ function App() {
     setIsPartial(false);
   }
 
+  function handleHistorySelect(entry: HistoryEntry) {
+    setTranscription(entry.text);
+    setIsPartial(entry.isPartial);
+    setState("done");
+  }
+
   const stepLabel =
     step === "audio"
       ? t("loading.audio")
@@ -164,7 +189,19 @@ function App() {
   return (
     <LangContext.Provider value={langContextValue}>
       <main className="app">
-        <SettingsDropdown />
+        {state !== "settings" && (
+          <button
+            type="button"
+            className="settings-fab"
+            onClick={() => setState("settings")}
+            title={t("settings.title")}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        )}
         <header className="app-header">
           <div className="app-logo">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -177,16 +214,23 @@ function App() {
           <p className="app-subtitle">{t("app.subtitle")}</p>
         </header>
 
-        <section className="app-content">
-          {state === "checking" && (
-            <div className="loading-section">
-              <div className="loading-pulse" />
-              <p className="loading-text">{t("deps.checking")}</p>
-            </div>
-          )}
+        {(state === "idle" || state === "done") && (
+          <button
+            type="button"
+            className="btn-history"
+            onClick={() => setState("history")}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            {t("history.button")}
+          </button>
+        )}
 
-          {state === "missing-deps" && deps && (
-            <DependencyCheck deps={deps} onRecheck={checkDeps} />
+        <section className="app-content">
+          {state === "settings" && (
+            <SettingsPage onContinue={handleSettingsContinue} isFirstRun={isFirstRun} />
           )}
 
           {state === "error" && (
@@ -200,6 +244,8 @@ function App() {
             <VideoUploader
               onPathSelected={handlePathSelected}
               isLoading={state === "loading"}
+              droppedFile={droppedFile}
+              dragOver={dragOver}
             />
           )}
 
@@ -239,6 +285,13 @@ function App() {
                 </>
               )}
             </div>
+          )}
+
+          {state === "history" && (
+            <TranscriptionHistory
+              onSelect={handleHistorySelect}
+              onBack={handleReset}
+            />
           )}
 
           {state === "done" && (

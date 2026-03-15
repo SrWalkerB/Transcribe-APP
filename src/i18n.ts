@@ -1,15 +1,15 @@
 export type Lang = "pt-BR" | "en" | "es";
 
 export const LANGUAGES: { value: Lang; label: string }[] = [
-  { value: "pt-BR", label: "Portugues (BR)" },
+  { value: "pt-BR", label: "Português (BR)" },
   { value: "en", label: "English" },
-  { value: "es", label: "Espanol" },
+  { value: "es", label: "Español" },
 ];
 
 const translations = {
   // Header
   "app.subtitle": {
-    "pt-BR": "Transcreva seus videos de forma simples e rapida",
+    "pt-BR": "Transcreva seus vídeos de forma simples e rápida",
     en: "Transcribe your videos simply and quickly",
     es: "Transcribe tus videos de forma simple y rapida",
   },
@@ -68,7 +68,7 @@ const translations = {
 
   // Uploader
   "upload.dragOrBrowse": {
-    "pt-BR": "Arraste seu video aqui ou",
+    "pt-BR": "Arraste seu vídeo aqui ou",
     en: "Drag your video here or",
     es: "Arrastra tu video aqui o",
   },
@@ -174,7 +174,7 @@ const translations = {
 
   // Result
   "result.title": {
-    "pt-BR": "Transcricao",
+    "pt-BR": "Transcrição",
     en: "Transcription",
     es: "Transcripcion",
   },
@@ -189,7 +189,7 @@ const translations = {
     es: "Copiado!",
   },
   "result.new": {
-    "pt-BR": "Nova transcricao",
+    "pt-BR": "Nova transcrição",
     en: "New transcription",
     es: "Nueva transcripcion",
   },
@@ -215,16 +215,68 @@ const translations = {
     es: "Cancelar",
   },
   "result.partial": {
-    "pt-BR": "Transcricao parcial",
+    "pt-BR": "Transcrição parcial",
     en: "Partial transcription",
     es: "Transcripcion parcial",
   },
 
   // Settings
+  "settings.title": {
+    "pt-BR": "Configurações",
+    en: "Settings",
+    es: "Configuracion",
+  },
   "settings.language": {
     "pt-BR": "Idioma",
     en: "Language",
     es: "Idioma",
+  },
+  "settings.deps": {
+    "pt-BR": "Dependências",
+    en: "Dependencies",
+    es: "Dependencias",
+  },
+  "settings.start": {
+    "pt-BR": "Começar",
+    en: "Get started",
+    es: "Comenzar",
+  },
+  "settings.save": {
+    "pt-BR": "Voltar ao app",
+    en: "Back to app",
+    es: "Volver a la app",
+  },
+  "settings.depsRequired": {
+    "pt-BR": "Instale todas as dependências para continuar",
+    en: "Install all dependencies to continue",
+    es: "Instala todas las dependencias para continuar",
+  },
+
+  // History
+  "history.title": {
+    "pt-BR": "Histórico",
+    en: "History",
+    es: "Historial",
+  },
+  "history.back": {
+    "pt-BR": "Voltar",
+    en: "Back",
+    es: "Volver",
+  },
+  "history.empty": {
+    "pt-BR": "Nenhuma transcrição ainda",
+    en: "No transcriptions yet",
+    es: "Ninguna transcripción aún",
+  },
+  "history.delete": {
+    "pt-BR": "Excluir",
+    en: "Delete",
+    es: "Eliminar",
+  },
+  "history.button": {
+    "pt-BR": "Histórico",
+    en: "History",
+    es: "Historial",
   },
 } as const;
 

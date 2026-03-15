@@ -98,48 +98,57 @@ struct DependencyStatus {
 struct TranscribeProcess(Arc<Mutex<Option<Child>>>);
 
 #[tauri::command]
-fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
-    let ffmpeg_bin = resolve_command("ffmpeg");
-    let ffmpeg = Command::new(&ffmpeg_bin)
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
+async fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
     let script_path = app
         .path()
         .resolve("resources/transcribe.py", BaseDirectory::Resource)
         .ok();
-    let python_bin = resolve_python(script_path.as_deref());
 
-    let python = python_command(&python_bin)
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    let faster_whisper = if python {
-        python_command(&python_bin)
-            .arg("-c")
-            .arg("import faster_whisper")
+    tokio::task::spawn_blocking(move || {
+        let ffmpeg_bin = resolve_command("ffmpeg");
+        let ffmpeg = Command::new(&ffmpeg_bin)
+            .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
-            .unwrap_or(false)
-    } else {
-        false
-    };
+            .unwrap_or(false);
 
-    DependencyStatus {
-        ffmpeg,
-        python,
-        faster_whisper,
-    }
+        let python_bin = resolve_python(script_path.as_deref());
+
+        let python = python_command(&python_bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let faster_whisper = if python {
+            python_command(&python_bin)
+                .arg("-c")
+                .arg("import faster_whisper")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        DependencyStatus {
+            ffmpeg,
+            python,
+            faster_whisper,
+        }
+    })
+    .await
+    .unwrap_or(DependencyStatus {
+        ffmpeg: false,
+        python: false,
+        faster_whisper: false,
+    })
 }
 
 #[tauri::command]
