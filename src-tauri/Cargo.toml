@@ -1,6 +1,6 @@
 [package]
 name = "transcribe-app"
-version = "0.1.5"
+version = "0.1.6"
 description = "Transcribe offline, transform video in text"
 authors = ["SrWalkerB"]
 edition = "2021"
