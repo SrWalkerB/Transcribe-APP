@@ -27,8 +27,17 @@ interface DroppedFile {
   duration?: number;
 }
 
+interface GpuInfo {
+  available: boolean;
+  gpu_type: string; // "nvidia" | "amd" | "none"
+  name: string | null;
+  libs_installed: boolean;
+  cmake_installed: boolean;
+  vulkan_dev_installed: boolean;
+}
+
 interface VideoUploaderProps {
-  onPathSelected: (path: string, model: string, threads: number) => void;
+  onPathSelected: (path: string, model: string, threads: number, device: string) => void;
   isLoading: boolean;
   droppedFile: DroppedFile | null;
   dragOver: boolean;
@@ -41,11 +50,19 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [threads, setThreads] = useState(4);
   const [maxThreads, setMaxThreads] = useState(4);
+  const [gpu, setGpu] = useState<GpuInfo | null>(null);
+  const [device, setDevice] = useState("cpu");
 
   useEffect(() => {
     invoke<number>("get_cpu_count").then((count) => {
       setMaxThreads(count);
       setThreads(count);
+    });
+    invoke<GpuInfo>("detect_gpu").then((info) => {
+      setGpu(info);
+      if (info.available && info.libs_installed) {
+        setDevice(info.gpu_type === "amd" ? "vulkan" : "cuda");
+      }
     });
   }, []);
 
@@ -81,7 +98,7 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
 
   function handleTranscribe() {
     if (selected?.path) {
-      onPathSelected(selected.path, model, threads);
+      onPathSelected(selected.path, model, threads, device);
     }
   }
 
@@ -217,25 +234,55 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
 
           {showAdvanced && (
             <div className="advanced-options">
-              <div className="threads-control">
-                <div className="threads-header">
-                  <label className="model-label">CPU Threads</label>
-                  <span className="threads-value">{threads}</span>
+              {gpu?.available && gpu.libs_installed && (
+                <div className="device-control">
+                  <label className="model-label">{t("upload.device")}</label>
+                  <div className="device-options">
+                    <button
+                      type="button"
+                      className={`device-btn ${device === "cpu" ? "device-btn--active" : ""}`}
+                      onClick={() => setDevice("cpu")}
+                      disabled={isLoading}
+                    >
+                      CPU
+                    </button>
+                    <button
+                      type="button"
+                      className={`device-btn ${device !== "cpu" ? "device-btn--active" : ""}`}
+                      onClick={() => setDevice(gpu.gpu_type === "amd" ? "vulkan" : "cuda")}
+                      disabled={isLoading}
+                    >
+                      GPU ({gpu.name})
+                    </button>
+                  </div>
                 </div>
-                <input
-                  type="range"
-                  min={1}
-                  max={maxThreads}
-                  value={threads}
-                  onChange={(e) => setThreads(Number(e.target.value))}
-                  className="threads-slider"
-                  disabled={isLoading}
-                />
-                <div className="threads-range">
-                  <span>1</span>
-                  <span>{maxThreads}</span>
+              )}
+
+              {gpu?.available && !gpu.libs_installed && (
+                <p className="gpu-hint">{t("gpu.hint")}</p>
+              )}
+
+              {device !== "cuda" && device !== "vulkan" && (
+                <div className="threads-control">
+                  <div className="threads-header">
+                    <label className="model-label">CPU Threads</label>
+                    <span className="threads-value">{threads}</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={maxThreads}
+                    value={threads}
+                    onChange={(e) => setThreads(Number(e.target.value))}
+                    className="threads-slider"
+                    disabled={isLoading}
+                  />
+                  <div className="threads-range">
+                    <span>1</span>
+                    <span>{maxThreads}</span>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
 

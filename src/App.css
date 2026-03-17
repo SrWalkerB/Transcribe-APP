@@ -499,6 +499,71 @@
   color: var(--text-muted);
 }
 
+/* ===== Device Selector ===== */
+.device-control {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.device-options {
+  display: flex;
+  gap: 8px;
+}
+
+.device-btn {
+  flex: 1;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.device-btn:hover {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
+}
+
+.device-btn--active {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+  color: var(--text-primary);
+}
+
+.device-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.gpu-hint {
+  font-size: 12px;
+  color: var(--accent);
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: var(--accent-glow);
+  border: 1px solid var(--accent);
+  border-opacity: 0.2;
+}
+
+/* ===== Settings GPU Section ===== */
+.settings-dep--neutral {
+  border-color: var(--border);
+  background: var(--bg-secondary);
+}
+
+.settings-dep__icon--neutral {
+  color: var(--text-muted);
+}
+
 /* ===== Transcribe Button ===== */
 .btn-transcribe {
   display: inline-flex;

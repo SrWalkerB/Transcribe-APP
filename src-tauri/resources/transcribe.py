@@ -7,11 +7,16 @@ parser.add_argument("mp3_name", help="Nome do arquivo MP3")
 parser.add_argument("mp3_path", help="Caminho absoluto do MP3")
 parser.add_argument("--model", default="base", choices=["tiny", "base", "small", "medium", "large", "turbo"])
 parser.add_argument("--threads", type=int, default=4)
+parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+parser.add_argument("--compute_type", default="int8")
 args = parser.parse_args()
 
 file_name = "./output-text/{}.txt".format(args.mp3_name)
 
-model = WhisperModel(args.model, device="cpu", compute_type="int8", cpu_threads=args.threads)
+if args.device == "cuda":
+    model = WhisperModel(args.model, device="cuda", compute_type=args.compute_type)
+else:
+    model = WhisperModel(args.model, device="cpu", compute_type=args.compute_type, cpu_threads=args.threads)
 
 segments, info = model.transcribe(args.mp3_path, beam_size=5)
 

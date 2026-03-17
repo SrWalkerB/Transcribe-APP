@@ -118,7 +118,7 @@ function App() {
     setState("idle");
   }
 
-  async function handlePathSelected(path: string, model: string, threads: number) {
+  async function handlePathSelected(path: string, model: string, threads: number, device: string = "cpu") {
     const fileName = path.replace(/^.*[/\\]/, "") || "video";
     setState("loading");
     setStep(null);
@@ -133,6 +133,7 @@ function App() {
         path,
         model,
         threads,
+        device,
       });
       setTranscription(result);
       setState("done");

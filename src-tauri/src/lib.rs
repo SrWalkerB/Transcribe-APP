@@ -23,6 +23,7 @@ fn resolve_command(name: &str) -> String {
         "/usr/local/bin",         // macOS Intel (Homebrew) / Linux
         "/usr/bin",               // System default
         "/snap/bin",              // Linux snap packages
+        "/usr/local/cuda/bin",    // NVIDIA CUDA toolkit
     ];
 
     // Inside AppImage, skip paths that are inside the AppImage mount
@@ -77,7 +78,7 @@ fn backend_venv_python(script_path: &Path) -> Option<String> {
     None
 }
 
-/// Resolve Python: first try venv, then common paths.
+/// Resolve Python: first try dev venv, then common paths.
 fn resolve_python(script_path: Option<&Path>) -> String {
     if let Some(sp) = script_path {
         if let Some(venv) = backend_venv_python(sp) {
@@ -87,11 +88,32 @@ fn resolve_python(script_path: Option<&Path>) -> String {
     resolve_command("python3")
 }
 
+/// App's own venv at ~/.local/share/transcribe-app/venv (for pywhispercpp/Vulkan)
+fn app_venv_python() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let venv_python = format!("{}/.local/share/transcribe-app/venv/bin/python3", home);
+    if Path::new(&venv_python).is_file() {
+        Some(venv_python)
+    } else {
+        None
+    }
+}
+
 #[derive(Serialize)]
 struct DependencyStatus {
     ffmpeg: bool,
     python: bool,
     faster_whisper: bool,
+}
+
+#[derive(Serialize)]
+struct GpuInfo {
+    available: bool,
+    gpu_type: String,           // "nvidia", "amd", "none"
+    name: Option<String>,
+    libs_installed: bool,       // CUDA libs for NVIDIA, pywhispercpp+vulkan for AMD
+    cmake_installed: bool,      // AMD prerequisite
+    vulkan_dev_installed: bool, // AMD prerequisite
 }
 
 /// Shared state: holds the running Python child process so cancel can kill it immediately.
@@ -228,6 +250,422 @@ fn install_dependencies_blocking(python_bin: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn detect_gpu(app: tauri::AppHandle) -> GpuInfo {
+    let script_path = app
+        .path()
+        .resolve("resources/transcribe.py", BaseDirectory::Resource)
+        .ok();
+
+    let no_gpu = GpuInfo {
+        available: false,
+        gpu_type: "none".to_string(),
+        name: None,
+        libs_installed: false,
+        cmake_installed: false,
+        vulkan_dev_installed: false,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        // Try NVIDIA first via nvidia-smi
+        let nvidia_smi = resolve_command("nvidia-smi");
+        let nvidia_output = Command::new(&nvidia_smi)
+            .arg("--query-gpu=name")
+            .arg("--format=csv,noheader,nounits")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+
+        if let Ok(out) = nvidia_output {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout);
+                let gpu_name = raw.lines().next().unwrap_or("").trim().to_string();
+                if !gpu_name.is_empty() {
+                    let python_bin = resolve_python(script_path.as_deref());
+                    let cuda_libs = python_command(&python_bin)
+                        .arg("-c")
+                        .arg("import ctranslate2; ctranslate2.get_supported_compute_types('cuda')")
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+
+                    return GpuInfo {
+                        available: true,
+                        gpu_type: "nvidia".to_string(),
+                        name: Some(gpu_name),
+                        libs_installed: cuda_libs,
+                        cmake_installed: false,
+                        vulkan_dev_installed: false,
+                    };
+                }
+            }
+        }
+
+        // Try AMD via lspci (look for amdgpu driver)
+        let lspci_output = Command::new("lspci")
+            .arg("-k")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+
+        if let Ok(out) = lspci_output {
+            if out.status.success() {
+                let raw = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = raw.lines().collect();
+                for (i, line) in lines.iter().enumerate() {
+                    if (line.contains("VGA") || line.contains("3D") || line.contains("Display"))
+                        && line.contains("AMD")
+                    {
+                        // Check if amdgpu driver is in use (next lines)
+                        let has_amdgpu = lines[i + 1..std::cmp::min(i + 4, lines.len())]
+                            .iter()
+                            .any(|l| l.contains("amdgpu"));
+
+                        if has_amdgpu {
+                            // Extract clean GPU name from lspci line
+                            // Input: "... Advanced Micro Devices, Inc. [AMD/ATI] Navi 48 [Radeon RX 9070 XT] (rev c0)"
+                            // Or:    "... Advanced Micro Devices, Inc. [AMD/ATI] Device 7550 (rev c0)"
+                            let raw_name = line
+                                .split(':')
+                                .last()
+                                .unwrap_or("")
+                                .trim();
+
+                            // Try to extract name from brackets [AMD/ATI] ...
+                            let gpu_name = if let Some(after_ati) = raw_name.split("[AMD/ATI]").nth(1) {
+                                let cleaned = after_ati.trim();
+                                // Remove trailing (rev XX)
+                                let cleaned = if let Some(idx) = cleaned.rfind("(rev") {
+                                    cleaned[..idx].trim()
+                                } else {
+                                    cleaned
+                                };
+                                // If it's just "Device XXXX", show as "AMD GPU"
+                                if cleaned.starts_with("Device ") {
+                                    "AMD GPU".to_string()
+                                } else {
+                                    // Try to get name from square brackets like [Radeon RX 9070 XT]
+                                    if let (Some(start), Some(end)) = (cleaned.rfind('['), cleaned.rfind(']')) {
+                                        cleaned[start + 1..end].to_string()
+                                    } else {
+                                        format!("AMD {}", cleaned)
+                                    }
+                                }
+                            } else {
+                                "AMD GPU".to_string()
+                            };
+
+                            // Check AMD prerequisites (build-essential + cmake + ninja)
+                            let cmake_ok = Command::new("cmake")
+                                .arg("--version")
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                                && Command::new("g++")
+                                    .arg("--version")
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false)
+                                && Command::new("ninja")
+                                    .arg("--version")
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false)
+                                && Command::new("glslc")
+                                    .arg("--version")
+                                    .stdout(Stdio::null())
+                                    .stderr(Stdio::null())
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false);
+
+                            let vulkan_dev_ok = Command::new("pkg-config")
+                                .arg("--exists")
+                                .arg("vulkan")
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                                || Path::new("/usr/include/vulkan/vulkan.h").exists();
+
+                            let python_bin = resolve_python(script_path.as_deref());
+                            // Check pywhispercpp in system python first, then app venv
+                            let vulkan_libs = python_command(&python_bin)
+                                .arg("-c")
+                                .arg("from pywhispercpp.model import Model")
+                                .stdout(Stdio::null())
+                                .stderr(Stdio::null())
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                                || app_venv_python().map(|vp| {
+                                    Command::new(&vp)
+                                        .env_remove("PYTHONHOME")
+                                        .env_remove("PYTHONPATH")
+                                        .arg("-c")
+                                        .arg("from pywhispercpp.model import Model")
+                                        .stdout(Stdio::null())
+                                        .stderr(Stdio::null())
+                                        .status()
+                                        .map(|s| s.success())
+                                        .unwrap_or(false)
+                                }).unwrap_or(false);
+
+                            return GpuInfo {
+                                available: true,
+                                gpu_type: "amd".to_string(),
+                                name: Some(gpu_name),
+                                libs_installed: vulkan_libs,
+                                cmake_installed: cmake_ok,
+                                vulkan_dev_installed: vulkan_dev_ok,
+                            };
+                        }
+                    }
+                }
+            }
+        }
+
+        GpuInfo {
+            available: false,
+            gpu_type: "none".to_string(),
+            name: None,
+            libs_installed: false,
+            cmake_installed: false,
+            vulkan_dev_installed: false,
+        }
+    })
+    .await
+    .unwrap_or(no_gpu)
+}
+
+#[tauri::command]
+async fn install_cuda_dependencies(app: tauri::AppHandle) -> Result<String, String> {
+    let script_path = app
+        .path()
+        .resolve("resources/transcribe.py", BaseDirectory::Resource)
+        .ok();
+    let python_bin = resolve_python(script_path.as_deref());
+
+    tokio::task::spawn_blocking(move || install_cuda_blocking(&python_bin))
+        .await
+        .map_err(|e| format!("Erro interno: {}", e))?
+}
+
+fn install_cuda_blocking(python_bin: &str) -> Result<String, String> {
+    // Strategy 1: pip install --user
+    let output = python_command(python_bin)
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--user")
+        .arg("nvidia-cublas-cu12")
+        .arg("nvidia-cudnn-cu12>=9")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip: {}", e))?;
+
+    if output.status.success() {
+        return Ok("Bibliotecas CUDA instaladas com sucesso!".to_string());
+    }
+
+    // Strategy 2: pip install --break-system-packages
+    let output2 = python_command(python_bin)
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--break-system-packages")
+        .arg("nvidia-cublas-cu12")
+        .arg("nvidia-cudnn-cu12>=9")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip: {}", e))?;
+
+    if output2.status.success() {
+        return Ok("Bibliotecas CUDA instaladas com sucesso!".to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "Falha ao instalar bibliotecas CUDA.\n\nTente manualmente:\n  pip install --user nvidia-cublas-cu12 \"nvidia-cudnn-cu12>=9\"\n\nDetalhe: {}",
+        stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+#[tauri::command]
+async fn install_vulkan_dependencies(app: tauri::AppHandle) -> Result<String, String> {
+    let script_path = app
+        .path()
+        .resolve("resources/transcribe.py", BaseDirectory::Resource)
+        .ok();
+    let python_bin = resolve_python(script_path.as_deref());
+
+    tokio::task::spawn_blocking(move || install_vulkan_blocking(&python_bin))
+        .await
+        .map_err(|e| format!("Erro interno: {}", e))?
+}
+
+fn install_vulkan_blocking(python_bin: &str) -> Result<String, String> {
+    // pywhispercpp with Vulkan requires building from source
+    // Prerequisites: build-essential, cmake, ninja-build, glslc, libvulkan-dev, mesa-vulkan-drivers
+    //
+    // IMPORTANT: pywhispercpp's setup.py leaks ALL env vars as cmake -D flags,
+    // so we must use env_clear() and only set essential vars.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/usr/local/bin".to_string());
+
+    // Strategy 1: pip install --user (clean env)
+    let output = Command::new(python_bin)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("GGML_VULKAN", "1")
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--user")
+        .arg("pywhispercpp")
+        .arg("--no-binary")
+        .arg("pywhispercpp")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip: {}", e))?;
+
+    if output.status.success() {
+        return Ok("pywhispercpp (Vulkan) instalado com sucesso!".to_string());
+    }
+
+    // Strategy 2: --break-system-packages (clean env)
+    let output2 = Command::new(python_bin)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("GGML_VULKAN", "1")
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--break-system-packages")
+        .arg("pywhispercpp")
+        .arg("--no-binary")
+        .arg("pywhispercpp")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip: {}", e))?;
+
+    if output2.status.success() {
+        return Ok("pywhispercpp (Vulkan) instalado com sucesso!".to_string());
+    }
+
+    // Strategy 3: create a venv and install there (avoids externally-managed-environment)
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let venv_dir = format!("{}/.local/share/transcribe-app/venv", home);
+    let venv_python = format!("{}/bin/python3", venv_dir);
+
+    // Create venv if it doesn't exist
+    if !Path::new(&venv_python).exists() {
+        let venv_create = python_command(python_bin)
+            .arg("-m")
+            .arg("venv")
+            .arg(&venv_dir)
+            .output()
+            .map_err(|e| format!("Falha ao criar venv: {}", e))?;
+
+        if !venv_create.status.success() {
+            let stderr = String::from_utf8_lossy(&output2.stderr);
+            return Err(format!(
+                "Falha ao instalar pywhispercpp.\n\n\
+                Tente manualmente:\n  python3 -m venv ~/.local/share/transcribe-app/venv\n  \
+                source ~/.local/share/transcribe-app/venv/bin/activate\n  \
+                GGML_VULKAN=1 pip install pywhispercpp --no-binary pywhispercpp\n\n\
+                Detalhe: {}",
+                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+            ));
+        }
+    }
+
+    // Upgrade pip and install wheel/setuptools in venv first
+    let _ = Command::new(&venv_python)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--upgrade")
+        .arg("pip")
+        .arg("setuptools")
+        .arg("wheel")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+
+    // Install in venv (clean env to prevent cmake -D leaking)
+    let output3 = Command::new(&venv_python)
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .env("GGML_VULKAN", "1")
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("pywhispercpp")
+        .arg("--no-binary")
+        .arg("pywhispercpp")
+        .output()
+        .map_err(|e| format!("Falha ao executar pip no venv: {}", e))?;
+
+    if output3.status.success() {
+        return Ok("pywhispercpp (Vulkan) instalado com sucesso!".to_string());
+    }
+
+    let stderr3 = String::from_utf8_lossy(&output3.stderr);
+    Err(format!(
+        "Falha ao instalar pywhispercpp com Vulkan.\n\n\
+        Tente manualmente:\n  python3 -m venv ~/.local/share/transcribe-app/venv\n  \
+        source ~/.local/share/transcribe-app/venv/bin/activate\n  \
+        GGML_VULKAN=1 pip install pywhispercpp --no-binary pywhispercpp\n\n\
+        Detalhe: {}",
+        stderr3.lines().take(5).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+#[tauri::command]
+async fn install_amd_system_deps() -> Result<String, String> {
+    tokio::task::spawn_blocking(|| {
+        // Use pkexec for graphical sudo prompt on Linux
+        let output = Command::new("pkexec")
+            .arg("apt")
+            .arg("install")
+            .arg("-y")
+            .arg("build-essential")
+            .arg("cmake")
+            .arg("ninja-build")
+            .arg("glslc")
+            .arg("libvulkan-dev")
+            .arg("mesa-vulkan-drivers")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|e| format!("Falha ao executar pkexec: {}", e))?;
+
+        if output.status.success() {
+            Ok("Pré-requisitos instalados com sucesso!".to_string())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(format!(
+                "Falha ao instalar pré-requisitos.\n\nTente manualmente:\n  sudo apt install build-essential cmake ninja-build glslc libvulkan-dev mesa-vulkan-drivers\n\nDetalhe: {}",
+                stderr.lines().take(5).collect::<Vec<_>>().join("\n")
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("Erro interno: {}", e))?
+}
+
+#[tauri::command]
 fn get_video_duration(path: String) -> Result<f64, String> {
     let ffprobe_bin = resolve_command("ffprobe");
     let output = Command::new(&ffprobe_bin)
@@ -258,6 +696,7 @@ async fn transcribe_video(
     path: String,
     model: String,
     threads: u32,
+    device: String,
     process_state: tauri::State<'_, TranscribeProcess>,
 ) -> Result<String, String> {
     {
@@ -268,7 +707,7 @@ async fn transcribe_video(
     let ps = process_state.0.clone();
 
     tokio::task::spawn_blocking(move || {
-        transcribe_video_blocking(&app, &path, &model, threads, &ps)
+        transcribe_video_blocking(&app, &path, &model, threads, &device, &ps)
     })
     .await
     .map_err(|e| format!("Erro interno: {}", e))?
@@ -294,6 +733,7 @@ fn transcribe_video_blocking(
     path: &str,
     model: &str,
     threads: u32,
+    device: &str,
     process_state: &Mutex<Option<Child>>,
 ) -> Result<String, String> {
     let video_path = Path::new(path);
@@ -343,26 +783,49 @@ fn transcribe_video_blocking(
         .to_str()
         .ok_or("Path do MP3 inválido (encoding)")?;
 
+    // Choose the right script based on device
+    let script_name = if device == "vulkan" {
+        "resources/transcribe_vk.py"
+    } else {
+        "resources/transcribe.py"
+    };
+
     let script_path = app
         .path()
-        .resolve("resources/transcribe.py", BaseDirectory::Resource)
-        .map_err(|e| format!("Script transcribe.py não encontrado no app: {:?}", e))?;
+        .resolve(script_name, BaseDirectory::Resource)
+        .map_err(|e| format!("Script {} não encontrado no app: {:?}", script_name, e))?;
     let script_path_str = script_path
         .to_str()
         .ok_or("Path do script inválido (encoding)")?;
 
     // Passo 2: transcrição com Python (streaming)
     let _ = app.emit("transcribe-step", "text");
-    let python_bin = resolve_python(Some(&script_path));
+    // For Vulkan, prefer the app venv (where pywhispercpp is installed)
+    let python_bin = if device == "vulkan" {
+        app_venv_python().unwrap_or_else(|| resolve_python(Some(&script_path)))
+    } else {
+        resolve_python(Some(&script_path))
+    };
 
-    let mut child = python_command(&python_bin)
-        .arg(script_path_str)
+    let mut cmd = python_command(&python_bin);
+    cmd.arg(script_path_str)
         .arg(&mp3_name)
         .arg(mp3_path_str)
         .arg("--model")
         .arg(model)
         .arg("--threads")
-        .arg(threads.to_string())
+        .arg(threads.to_string());
+
+    // Only pass --device and --compute_type for faster-whisper backend
+    if device != "vulkan" {
+        let compute_type = if device == "cuda" { "float16" } else { "int8" };
+        cmd.arg("--device")
+            .arg(device)
+            .arg("--compute_type")
+            .arg(compute_type);
+    }
+
+    let mut child = cmd
         .current_dir(&temp_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -374,6 +837,25 @@ fn transcribe_video_blocking(
         .take()
         .ok_or("Falha ao capturar stdout do Python")?;
     let stderr_pipe = child.stderr.take();
+
+    // Consume stderr in a background thread to prevent pipe buffer deadlock
+    // (whisper.cpp prints many lines to stderr during model loading)
+    let stderr_thread = stderr_pipe.map(|pipe| {
+        std::thread::spawn(move || {
+            let mut buf = String::new();
+            let reader = BufReader::new(pipe);
+            for line in reader.lines() {
+                match line {
+                    Ok(l) => {
+                        buf.push_str(&l);
+                        buf.push('\n');
+                    }
+                    Err(_) => break,
+                }
+            }
+            buf
+        })
+    });
 
     // Store child in shared state so cancel_transcription can kill it
     {
@@ -447,13 +929,8 @@ fn transcribe_video_blocking(
         }
 
         // Check stderr for specific errors
-        let stderr_output = stderr_pipe
-            .map(|s| {
-                let mut buf = String::new();
-                let mut reader = BufReader::new(s);
-                let _ = reader.read_line(&mut buf);
-                buf
-            })
+        let stderr_output = stderr_thread
+            .and_then(|t| t.join().ok())
             .unwrap_or_default();
 
         if stderr_output.contains("faster_whisper") || stderr_output.contains("ModuleNotFoundError")
@@ -463,6 +940,12 @@ fn transcribe_video_blocking(
                 Volte para a tela inicial e clique em \"Verificar dependências\" para instalar automaticamente."
                     .to_string(),
             );
+        } else if stderr_output.contains("pywhispercpp") || stderr_output.contains("No module named")
+        {
+            return Err(
+                "pywhispercpp não encontrado. Instale em Configurações > GPU Acceleration."
+                    .to_string(),
+            );
         } else if stderr_output.contains("python3")
             && (stderr_output.contains("not found") || stderr_output.contains("No such file"))
         {
@@ -470,6 +953,24 @@ fn transcribe_video_blocking(
                 "Python não foi encontrado no sistema. Instale Python 3 e o módulo faster-whisper."
                     .to_string(),
             );
+        }
+
+        // Show last meaningful lines from stderr for debugging
+        let last_lines: String = stderr_output
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with("whisper_"))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if !last_lines.is_empty() {
+            return Err(format!("Erro na transcrição:\n{}", last_lines));
         }
 
         return Err(format!(
@@ -501,6 +1002,10 @@ pub fn run() {
             transcribe_video,
             check_dependencies,
             install_dependencies,
+            detect_gpu,
+            install_cuda_dependencies,
+            install_vulkan_dependencies,
+            install_amd_system_deps,
             get_cpu_count,
             get_video_duration,
             cancel_transcription

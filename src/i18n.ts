@@ -55,6 +55,11 @@ const translations = {
     en: "Install faster-whisper",
     es: "Instalar faster-whisper",
   },
+  "deps.update": {
+    "pt-BR": "Atualizar faster-whisper",
+    en: "Update faster-whisper",
+    es: "Actualizar faster-whisper",
+  },
   "deps.recheck": {
     "pt-BR": "Verificar novamente",
     en: "Check again",
@@ -277,6 +282,98 @@ const translations = {
     "pt-BR": "Histórico",
     en: "History",
     es: "Historial",
+  },
+
+  // GPU
+  "gpu.title": {
+    "pt-BR": "Aceleração GPU",
+    en: "GPU Acceleration",
+    es: "Aceleración GPU",
+  },
+  "gpu.detected": {
+    "pt-BR": "GPU NVIDIA detectada",
+    en: "NVIDIA GPU detected",
+    es: "GPU NVIDIA detectada",
+  },
+  "gpu.notDetected": {
+    "pt-BR": "Nenhuma GPU detectada",
+    en: "No GPU detected",
+    es: "Ninguna GPU detectada",
+  },
+  "gpu.cudaLibs": {
+    "pt-BR": "Bibliotecas CUDA",
+    en: "CUDA Libraries",
+    es: "Bibliotecas CUDA",
+  },
+  "gpu.cudaLibs.hint": {
+    "pt-BR": "Necessárias para usar GPU (~500MB)",
+    en: "Required for GPU usage (~500MB)",
+    es: "Necesarias para usar GPU (~500MB)",
+  },
+  "gpu.installCuda": {
+    "pt-BR": "Instalar CUDA",
+    en: "Install CUDA",
+    es: "Instalar CUDA",
+  },
+  "gpu.updateCuda": {
+    "pt-BR": "Atualizar CUDA",
+    en: "Update CUDA",
+    es: "Actualizar CUDA",
+  },
+  "gpu.installingCuda": {
+    "pt-BR": "Instalando CUDA...",
+    en: "Installing CUDA...",
+    es: "Instalando CUDA...",
+  },
+  "gpu.installVulkan": {
+    "pt-BR": "Instalar Vulkan",
+    en: "Install Vulkan",
+    es: "Instalar Vulkan",
+  },
+  "gpu.updateVulkan": {
+    "pt-BR": "Atualizar Vulkan",
+    en: "Update Vulkan",
+    es: "Actualizar Vulkan",
+  },
+  "gpu.installingVulkan": {
+    "pt-BR": "Instalando Vulkan...",
+    en: "Installing Vulkan...",
+    es: "Instalando Vulkan...",
+  },
+  "upload.device": {
+    "pt-BR": "Dispositivo",
+    en: "Device",
+    es: "Dispositivo",
+  },
+  "gpu.hint": {
+    "pt-BR": "GPU disponível — instale as bibliotecas em Configurações",
+    en: "GPU available — install libraries in Settings",
+    es: "GPU disponible — instala las bibliotecas en Configuraciones",
+  },
+  "gpu.systemDeps": {
+    "pt-BR": "Pré-requisitos do sistema",
+    en: "System prerequisites",
+    es: "Prerrequisitos del sistema",
+  },
+  "gpu.systemDeps.hint": {
+    "pt-BR": "build-essential, cmake, ninja-build, glslc, vulkan",
+    en: "build-essential, cmake, ninja-build, glslc, vulkan",
+    es: "build-essential, cmake, ninja-build, glslc, vulkan",
+  },
+  "gpu.installSystemDeps": {
+    "pt-BR": "Instalar pré-requisitos",
+    en: "Install prerequisites",
+    es: "Instalar prerrequisitos",
+  },
+  "gpu.updateSystemDeps": {
+    "pt-BR": "Atualizar",
+    en: "Update",
+    es: "Actualizar",
+  },
+  "gpu.installingSystemDeps": {
+    "pt-BR": "Instalando pré-requisitos...",
+    en: "Installing prerequisites...",
+    es: "Instalando prerrequisitos...",
   },
 } as const;
 
