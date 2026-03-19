@@ -1,4 +1,5 @@
 use std::fs;
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -8,6 +9,16 @@ use chrono::Local;
 use serde::Serialize;
 use tauri::path::BaseDirectory;
 use tauri::{Emitter, Manager};
+
+#[cfg(windows)]
+fn suppress_console(cmd: &mut Command) {
+    // Evita a janela de terminal "aparecer/fechar" ao executar binários de CLI no Windows.
+    use std::os::windows::process::CommandExt;
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+}
+
+#[cfg(not(windows))]
+fn suppress_console(_cmd: &mut Command) {}
 
 /// Check if we're running inside an AppImage.
 fn is_appimage() -> bool {
@@ -127,8 +138,14 @@ struct DependencyStatus {
     faster_whisper: bool,
 }
 
-/// Shared state: holds the running Python child process so cancel can kill it immediately.
-struct TranscribeProcess(Arc<Mutex<Option<Child>>>);
+/// Shared state: holds the running Python child process + cancellation flag.
+struct TranscribeState {
+    child: Option<Child>,
+    cancel_requested: bool,
+}
+
+/// Shared state wrapper for Tauri.
+struct TranscribeProcess(Arc<Mutex<TranscribeState>>);
 
 #[tauri::command]
 async fn check_dependencies(app: tauri::AppHandle) -> DependencyStatus {
@@ -361,7 +378,8 @@ async fn transcribe_video(
 ) -> Result<String, String> {
     {
         let mut guard = process_state.0.lock().unwrap();
-        *guard = None;
+        guard.child = None;
+        guard.cancel_requested = false;
     }
 
     let ps = process_state.0.clone();
@@ -376,7 +394,8 @@ async fn transcribe_video(
 #[tauri::command]
 fn cancel_transcription(process_state: tauri::State<'_, TranscribeProcess>) {
     let mut guard = process_state.0.lock().unwrap();
-    if let Some(ref mut child) = *guard {
+    guard.cancel_requested = true;
+    if let Some(ref mut child) = guard.child {
         let _ = child.kill();
     }
 }
@@ -393,7 +412,7 @@ fn transcribe_video_blocking(
     path: &str,
     model: &str,
     threads: u32,
-    process_state: &Mutex<Option<Child>>,
+    process_state: &Mutex<TranscribeState>,
 ) -> Result<String, String> {
     let video_path = Path::new(path);
     if !video_path.exists() {
@@ -417,11 +436,16 @@ fn transcribe_video_blocking(
     // Passo 1: ffmpeg vídeo -> MP3
     let _ = app.emit("transcribe-step", "audio");
     let ffmpeg_bin = resolve_command("ffmpeg");
-    let ffmpeg_out = Command::new(&ffmpeg_bin)
+    let mut ffmpeg_cmd = Command::new(&ffmpeg_bin);
+    suppress_console(&mut ffmpeg_cmd);
+    let ffmpeg_out = ffmpeg_cmd
         .arg("-i")
         .arg(path)
         .arg("-b:a")
         .arg("128k")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-hide_banner")
         .arg("-y")
         .arg(&mp3_path)
         .output()
@@ -454,7 +478,10 @@ fn transcribe_video_blocking(
     let _ = app.emit("transcribe-step", "text");
     let python_bin = resolve_python(Some(&script_path));
 
-    let mut child = python_command(&python_bin)
+    let mut py_cmd = python_command(&python_bin);
+    suppress_console(&mut py_cmd);
+
+    let mut child = py_cmd
         .arg(script_path_str)
         .arg(&mp3_name)
         .arg(mp3_path_str)
@@ -477,12 +504,35 @@ fn transcribe_video_blocking(
     // Store child in shared state so cancel_transcription can kill it
     {
         let mut guard = process_state.lock().unwrap();
-        *guard = Some(child);
+        guard.child = Some(child);
     }
+
+    // Drena stderr em paralelo para evitar bloqueios e para termos detalhes caso falhe.
+    let stderr_handle = std::thread::spawn(move || {
+        let mut lines: VecDeque<String> = VecDeque::new();
+        const MAX_LINES: usize = 250;
+
+        if let Some(stderr) = stderr_pipe {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                let l = match line {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                lines.push_back(l);
+                while lines.len() > MAX_LINES {
+                    lines.pop_front();
+                }
+            }
+        }
+
+        lines.into_iter().collect::<Vec<_>>().join("\n")
+    });
 
     let reader = BufReader::new(stdout);
     let mut duration: f64 = 0.0;
     let mut full_text = String::new();
+    let mut done_received = false;
 
     for line in reader.lines() {
         let line = match line {
@@ -518,62 +568,78 @@ fn transcribe_video_blocking(
                 );
             }
         } else if line == "__DONE__" {
+            done_received = true;
             break;
         }
     }
 
     // Wait for process to finish and check result
     let mut guard = process_state.lock().unwrap();
-    let cancelled = if let Some(ref mut child) = *guard {
-        let status = child.wait();
-        match status {
-            Ok(s) => !s.success(),
-            Err(_) => true,
+    let cancel_requested = guard.cancel_requested;
+    let status_success = if let Some(ref mut child) = guard.child {
+        match child.wait() {
+            Ok(s) => s.success(),
+            Err(_) => false,
         }
     } else {
         // child was already taken/killed
-        true
+        false
     };
-    // Clear the process from state
-    *guard = None;
+    // Clear the process from state (and reset cancel flag for next run)
+    guard.child = None;
+    guard.cancel_requested = false;
     drop(guard);
 
-    // If process was killed (cancelled) or ended abnormally
-    if cancelled {
-        // Check if it was a user cancel (full_text exists but process was killed)
-        if !full_text.is_empty() {
-            return Err(format!("__CANCELLED__{}", full_text));
+    let stderr_output = stderr_handle.join().unwrap_or_default();
+
+    // Classificação:
+    // - Se o usuário pediu cancelamento, retornamos "__CANCELLED__" (mesmo que tenha falhado).
+    // - Se não cancelou e falhou, retornamos erro real com detalhes para depuração.
+    if !status_success {
+        if cancel_requested && !done_received {
+            // Mantém o protocolo do frontend: quando começa com "__CANCELLED__", ele exibe parcial.
+            if !full_text.trim().is_empty() {
+                return Err(format!("__CANCELLED__{}", full_text));
+            }
+            return Err("__CANCELLED__".to_string());
         }
 
-        // Check stderr for specific errors
-        let stderr_output = stderr_pipe
-            .map(|s| {
-                let mut buf = String::new();
-                let mut reader = BufReader::new(s);
-                let _ = reader.read_line(&mut buf);
-                buf
-            })
-            .unwrap_or_default();
+        let partial_hint = if full_text.trim().is_empty() {
+            "".to_string()
+        } else {
+            format!("\n\nTrecho transcrito (parcial):\n{}", full_text)
+        };
 
-        if stderr_output.contains("faster_whisper") || stderr_output.contains("ModuleNotFoundError")
+        if stderr_output.contains("faster_whisper")
+            || stderr_output.contains("ModuleNotFoundError")
+            || stderr_output.contains("No module named")
         {
             return Err(
-                "Para transcrever, é necessário ter o módulo faster-whisper instalado.\n\n\
-                Volte para a tela inicial e clique em \"Verificar dependências\" para instalar automaticamente."
-                    .to_string(),
+                format!(
+                    "Para transcrever, é necessário ter o módulo faster-whisper instalado.\n\n\
+Volte para a tela inicial e clique em \"Verificar dependências\" para instalar automaticamente.\n\n\
+Detalhe (stderr):\n{}{}",
+                    stderr_output.trim(),
+                    partial_hint
+                )
             );
         } else if stderr_output.contains("python3")
             && (stderr_output.contains("not found") || stderr_output.contains("No such file"))
         {
             return Err(
-                "Python não foi encontrado no sistema. Instale Python 3 e o módulo faster-whisper."
-                    .to_string(),
+                format!(
+                    "Python não foi encontrado no sistema. Instale Python 3 e o módulo faster-whisper.\n\n\
+Detalhe (stderr):\n{}{}",
+                    stderr_output.trim(),
+                    partial_hint
+                )
             );
         }
 
         return Err(format!(
-            "__CANCELLED__{}",
-            full_text
+            "Falha ao transcrever o vídeo.\n\nDetalhe (stderr):\n{}{}",
+            stderr_output.trim(),
+            partial_hint
         ));
     }
 
@@ -595,7 +661,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .manage(TranscribeProcess(Arc::new(Mutex::new(None))))
+        .manage(TranscribeProcess(Arc::new(Mutex::new(TranscribeState {
+            child: None,
+            cancel_requested: false,
+        }))))
         .invoke_handler(tauri::generate_handler![
             transcribe_video,
             check_dependencies,

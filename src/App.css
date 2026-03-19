@@ -590,6 +590,12 @@
   color: var(--text-muted);
 }
 
+.loading-timer {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
 /* ===== Progress Bar ===== */
 .progress-bar-wrapper {
   display: flex;
@@ -802,6 +808,14 @@
   border-radius: var(--radius-md);
   color: var(--error);
   font-size: 14px;
+}
+
+.error-banner__actions {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .error-banner p {

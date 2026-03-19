@@ -25,7 +25,9 @@ function App() {
   const [step, setStep] = useState<TranscribeStep>(null);
   const [transcription, setTranscription] = useState("");
   const [error, setError] = useState("");
+  const [errorCopied, setErrorCopied] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const [liveText, setLiveText] = useState("");
   const [detectedLang, setDetectedLang] = useState("");
   const [isPartial, setIsPartial] = useState(false);
@@ -35,6 +37,8 @@ function App() {
     return (localStorage.getItem("transcribe-lang") as Lang) || "pt-BR";
   });
   const liveTextRef = useRef<HTMLDivElement>(null);
+  const startTimestampRef = useRef<number | null>(null);
+  const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const setLang = useCallback((newLang: Lang) => {
     setLangState(newLang);
@@ -75,10 +79,46 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (state !== "loading") return;
+
+    // Inicia o contador quando o usuário inicia a transcrição.
+    setElapsedMs(0);
+    startTimestampRef.current = Date.now();
+
+    timerIntervalRef.current = setInterval(() => {
+      if (startTimestampRef.current != null) {
+        setElapsedMs(Date.now() - startTimestampRef.current);
+      }
+    }, 250);
+
+    return () => {
+      if (timerIntervalRef.current) {
+        clearInterval(timerIntervalRef.current);
+      }
+      timerIntervalRef.current = null;
+      startTimestampRef.current = null;
+      setElapsedMs(0);
+    };
+  }, [state]);
+
+  useEffect(() => {
     if (liveTextRef.current) {
       liveTextRef.current.scrollTop = liveTextRef.current.scrollHeight;
     }
   }, [liveText]);
+
+  function formatElapsed(ms: number) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    const pad2 = (n: number) => String(n).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${pad2(minutes)}:${pad2(seconds)}`;
+    }
+    return `${pad2(minutes)}:${pad2(seconds)}`;
+  }
 
   // Tauri native drag-drop: provides actual file paths
   const ACCEPTED_EXTENSIONS = ["mp4", "mkv", "avi", "mov", "webm"];
@@ -123,6 +163,7 @@ function App() {
     setState("loading");
     setStep(null);
     setError("");
+    setErrorCopied(false);
     setProgress(0);
     setLiveText("");
     setDetectedLang("");
@@ -167,10 +208,29 @@ function App() {
     setStep(null);
     setTranscription("");
     setError("");
+    setErrorCopied(false);
     setProgress(0);
+    setElapsedMs(0);
     setLiveText("");
     setDetectedLang("");
     setIsPartial(false);
+  }
+
+  async function handleCopyError() {
+    try {
+      await navigator.clipboard.writeText(error);
+      setErrorCopied(true);
+      setTimeout(() => setErrorCopied(false), 2000);
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = error;
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand("copy");
+      document.body.removeChild(textarea);
+      setErrorCopied(true);
+      setTimeout(() => setErrorCopied(false), 2000);
+    }
   }
 
   function handleHistorySelect(entry: HistoryEntry) {
@@ -223,7 +283,12 @@ function App() {
           {state === "error" && (
             <div className="error-banner">
               <p>{error}</p>
-              <button type="button" onClick={handleReset}>{t("error.tryAgain")}</button>
+              <div className="error-banner__actions">
+                <button type="button" onClick={handleCopyError}>
+                  {errorCopied ? t("error.copied") : t("error.copy")}
+                </button>
+                <button type="button" onClick={handleReset}>{t("error.tryAgain")}</button>
+              </div>
             </div>
           )}
 
@@ -238,6 +303,9 @@ function App() {
 
           {state === "loading" && (
             <div className="loading-section">
+              <p className="loading-timer">
+                {t("loading.elapsed")}: {formatElapsed(elapsedMs)}
+              </p>
               {step === "text" && progress > 0 ? (
                 <>
                   <div className="progress-bar-wrapper">

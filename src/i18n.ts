@@ -176,6 +176,11 @@ const translations = {
     en: "This may take a few minutes",
     es: "Esto puede tardar unos minutos",
   },
+  "loading.elapsed": {
+    "pt-BR": "Tempo decorrido",
+    en: "Elapsed time",
+    es: "Tiempo transcurrido",
+  },
   "loading.detectedLang": {
     "pt-BR": "Idioma detectado",
     en: "Detected language",
@@ -209,6 +214,16 @@ const translations = {
     "pt-BR": "Tentar novamente",
     en: "Try again",
     es: "Intentar de nuevo",
+  },
+  "error.copy": {
+    "pt-BR": "Copiar detalhes",
+    en: "Copy details",
+    es: "Copiar detalles",
+  },
+  "error.copied": {
+    "pt-BR": "Detalhes copiados!",
+    en: "Details copied!",
+    es: "Detalles copiados!",
   },
 
   // Upload - duration
