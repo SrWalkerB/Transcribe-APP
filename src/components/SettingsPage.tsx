@@ -229,7 +229,7 @@ export default function SettingsPage({ onContinue, isFirstRun }: SettingsPagePro
               name="FFmpeg"
               ok={deps.ffmpeg}
               hint={!deps.ffmpeg ? t("deps.ffmpeg.hint") : undefined}
-              canInstall={!deps.ffmpeg && deps.python}
+              canInstall={!deps.ffmpeg && (deps.python || platform === "windows")}
               installing={installingTarget === "ffmpeg"}
               onInstall={handleInstallFfmpeg}
               installLabel={installingTarget === "ffmpeg" ? t("deps.ffmpeg.installing") : t("deps.ffmpeg.install")}

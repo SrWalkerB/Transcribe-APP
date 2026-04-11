@@ -26,9 +26,9 @@ const translations = {
     es: "Antes de transcribir, verifica si las dependencias estan instaladas:",
   },
   "deps.ffmpeg.hint": {
-    "pt-BR": "Clique em instalar para baixar a versão certa para seu sistema",
-    en: "Click install to download the right build for your system",
-    es: "Haz clic en instalar para descargar la versión correcta para tu sistema",
+    "pt-BR": "Clique em instalar — o app baixa e configura o FFmpeg automaticamente",
+    en: "Click install — the app downloads and configures FFmpeg automatically",
+    es: "Haz clic en instalar — la app descarga y configura FFmpeg automáticamente",
   },
   "deps.ffmpeg.install": {
     "pt-BR": "Instalar FFmpeg",
@@ -41,9 +41,9 @@ const translations = {
     es: "Instalando FFmpeg...",
   },
   "deps.python.hint.windows": {
-    "pt-BR": "Clique em instalar para baixar o Python 3.12 via winget",
-    en: "Click install to download Python 3.12 via winget",
-    es: "Haz clic en instalar para descargar Python 3.12 via winget",
+    "pt-BR": "Clique em instalar — tenta winget, com fallback para o instalador oficial do python.org",
+    en: "Click install — tries winget, falls back to the official python.org installer",
+    es: "Haz clic en instalar — intenta winget, con fallback al instalador oficial de python.org",
   },
   "deps.python.hint.macos": {
     "pt-BR": "Instale via python.org ou `brew install python3`",

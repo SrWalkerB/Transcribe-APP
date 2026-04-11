@@ -52,6 +52,37 @@ fn resolve_command(name: &str) -> String {
     resolve_command_any(&[name])
 }
 
+#[cfg(windows)]
+fn python_from_py_launcher() -> Option<String> {
+    let mut cmd = Command::new("py");
+    suppress_console(&mut cmd);
+    let output = cmd.arg("-0p").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    // Formato típico: " -V:3.12 *        C:\...\python.exe"
+    // Procuramos linhas que terminam em python.exe e extraímos a partir da letra de drive.
+    for line in text.lines() {
+        let trimmed = line.trim_end();
+        if !trimmed.to_lowercase().ends_with("python.exe") {
+            continue;
+        }
+        // Localiza a primeira ocorrência de "X:\" onde X é letra (drive).
+        let bytes = trimmed.as_bytes();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i].is_ascii_alphabetic() && bytes[i + 1] == b':' && bytes[i + 2] == b'\\' {
+                let path = &trimmed[i..];
+                if Path::new(path).is_file() {
+                    return Some(path.to_string());
+                }
+                break;
+            }
+        }
+    }
+    None
+}
+
 fn resolve_command_any(names: &[&str]) -> String {
     for name in names {
         if let Some(installed) = installed_command_path(name) {
@@ -61,22 +92,35 @@ fn resolve_command_any(names: &[&str]) -> String {
 
     #[cfg(windows)]
     {
+        // Para python, usar o launcher py.exe para descobrir instalações dinamicamente.
+        let wants_python = names.iter().any(|n| *n == "python" || *n == "python3");
+        if wants_python {
+            if let Some(p) = python_from_py_launcher() {
+                return p;
+            }
+        }
+
+        let mut win_dirs: Vec<String> = Vec::new();
         if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            let win_dirs = [
-                format!("{}\\Programs\\Python\\Python313", local),
-                format!("{}\\Programs\\Python\\Python313\\Scripts", local),
-                format!("{}\\Programs\\Python\\Python312", local),
-                format!("{}\\Programs\\Python\\Python312\\Scripts", local),
-                format!("{}\\Programs\\Python\\Python311", local),
-                format!("{}\\Programs\\Python\\Python311\\Scripts", local),
-                format!("{}\\Microsoft\\WindowsApps", local),
-            ];
-            for name in names {
-                for dir in &win_dirs {
-                    let full = format!("{}\\{}.exe", dir, name);
-                    if Path::new(&full).is_file() {
-                        return full;
-                    }
+            for ver in ["314", "313", "312", "311", "310"] {
+                win_dirs.push(format!("{}\\Programs\\Python\\Python{}", local, ver));
+                win_dirs.push(format!("{}\\Programs\\Python\\Python{}\\Scripts", local, ver));
+            }
+            win_dirs.push(format!("{}\\Microsoft\\WindowsApps", local));
+        }
+        for env_var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Ok(pf) = std::env::var(env_var) {
+                for ver in ["314", "313", "312", "311", "310"] {
+                    win_dirs.push(format!("{}\\Python{}", pf, ver));
+                    win_dirs.push(format!("{}\\Python{}\\Scripts", pf, ver));
+                }
+            }
+        }
+        for name in names {
+            for dir in &win_dirs {
+                let full = format!("{}\\{}.exe", dir, name);
+                if Path::new(&full).is_file() {
+                    return full;
                 }
             }
         }
@@ -319,10 +363,34 @@ async fn install_python() -> Result<String, String> {
 }
 
 #[cfg(windows)]
+fn detect_python_windows() -> Option<String> {
+    let bin = resolve_command_any(&["python3", "python"]);
+    let mut cmd = python_command(&bin);
+    suppress_console(&mut cmd);
+    let ok = cmd
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok { Some(bin) } else { None }
+}
+
+#[cfg(windows)]
 fn install_python_blocking() -> Result<String, String> {
+    // Passo 1: já existe? Se sim, apenas reportar sucesso.
+    if let Some(path) = detect_python_windows() {
+        return Ok(format!(
+            "Python já está instalado em {}. Clique em Verificar novamente.",
+            path
+        ));
+    }
+
+    // Passo 2: tentar winget.
     let mut cmd = Command::new("winget");
     suppress_console(&mut cmd);
-    let output = cmd
+    let winget_result = cmd
         .args([
             "install",
             "-e",
@@ -334,25 +402,78 @@ fn install_python_blocking() -> Result<String, String> {
             "user",
             "--silent",
         ])
-        .output()
-        .map_err(|e| {
-            format!(
-                "Não foi possível executar o winget: {}.\n\nInstale o App Installer pela Microsoft Store ou baixe manualmente em https://www.python.org/downloads/",
+        .output();
+
+    let winget_detail: String = match winget_result {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let combined = format!("{}\n{}", stdout, stderr);
+
+            // Se o winget diz "já instalado" ou sucesso, re-tentar detectar.
+            let already = combined.contains("already installed")
+                || combined.contains("No available upgrade")
+                || combined.contains("No newer package versions");
+            if output.status.success() || already {
+                if let Some(path) = detect_python_windows() {
+                    return Ok(format!(
+                        "Python detectado em {}. Clique em Verificar novamente.",
+                        path
+                    ));
+                }
+            }
+            combined
+        }
+        Err(e) => format!("Não foi possível executar o winget: {}", e),
+    };
+
+    // Passo 3: fallback — baixar o instalador oficial via PowerShell e rodar silencioso.
+    let installer_url = "https://www.python.org/ftp/python/3.12.8/python-3.12.8-amd64.exe";
+    let ps_script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $tmp = Join-Path $env:TEMP ('python-installer-' + [guid]::NewGuid() + '.exe'); \
+         Invoke-WebRequest -Uri '{url}' -OutFile $tmp -UseBasicParsing; \
+         $p = Start-Process -FilePath $tmp -ArgumentList '/quiet','InstallAllUsers=0','PrependPath=1','Include_launcher=1','Include_pip=1' -Wait -PassThru; \
+         Remove-Item $tmp -Force -ErrorAction SilentlyContinue; \
+         if ($p.ExitCode -ne 0) {{ throw \"Installer exit code $($p.ExitCode)\" }}",
+        url = installer_url
+    );
+
+    let mut ps = Command::new("powershell");
+    suppress_console(&mut ps);
+    let ps_out = ps
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .output();
+
+    match ps_out {
+        Ok(out) if out.status.success() => {
+            if let Some(path) = detect_python_windows() {
+                return Ok(format!(
+                    "Python instalado em {} via installer oficial. Clique em Verificar novamente.",
+                    path
+                ));
+            }
+            // Instalou mas ainda não achamos — provavelmente PATH novo ainda não aplicado.
+            return Ok(
+                "Python instalado via installer oficial. Reinicie o app e clique em Verificar novamente.".into(),
+            );
+        }
+        Ok(out) => {
+            let ps_stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(format!(
+                "Falha ao instalar Python.\n\nWinget:\n{}\n\nInstaller oficial:\n{}\n\nBaixe manualmente em https://www.python.org/downloads/",
+                winget_detail.lines().take(5).collect::<Vec<_>>().join("\n"),
+                ps_stderr.lines().take(5).collect::<Vec<_>>().join("\n"),
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "Falha ao instalar Python.\n\nWinget:\n{}\n\nPowerShell indisponível: {}\n\nBaixe manualmente em https://www.python.org/downloads/",
+                winget_detail.lines().take(5).collect::<Vec<_>>().join("\n"),
                 e
-            )
-        })?;
-
-    if output.status.success() {
-        return Ok("Python instalado com sucesso! Pode ser necessário reiniciar o app.".into());
+            ));
+        }
     }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "Falha ao instalar Python via winget.\n\nDetalhe:\n{}\n{}",
-        stdout.lines().take(5).collect::<Vec<_>>().join("\n"),
-        stderr.lines().take(5).collect::<Vec<_>>().join("\n"),
-    ))
 }
 
 #[cfg(not(windows))]
@@ -361,32 +482,86 @@ fn install_python_blocking() -> Result<String, String> {
 }
 
 #[tauri::command]
+#[allow(unused_variables)]
 async fn install_ffmpeg(app: tauri::AppHandle) -> Result<String, String> {
-    let script_path = app
-        .path()
-        .resolve("resources/install_ffmpeg.py", BaseDirectory::Resource)
-        .map_err(|e| format!("Script install_ffmpeg.py não encontrado no app: {:?}", e))?;
-    let transcribe_script = app
-        .path()
-        .resolve("resources/transcribe.py", BaseDirectory::Resource)
-        .ok();
-    let python_bin = resolve_python(transcribe_script.as_deref());
     let install_dir = local_ffmpeg_bin_dir()
         .ok_or_else(|| "Não foi possível localizar a pasta de dados do app".to_string())?;
-    let script_path = script_path
-        .to_str()
-        .ok_or_else(|| "Path do script inválido (encoding)".to_string())?
-        .to_string();
     let install_dir = install_dir
         .to_str()
         .ok_or_else(|| "Path de instalação inválido (encoding)".to_string())?
         .to_string();
 
-    tokio::task::spawn_blocking(move || install_ffmpeg_blocking(&python_bin, &script_path, &install_dir))
+    #[cfg(windows)]
+    {
+        let dir = install_dir.clone();
+        return tokio::task::spawn_blocking(move || install_ffmpeg_windows_native(&dir))
+            .await
+            .map_err(|e| format!("Erro interno: {}", e))?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let script_path = app
+            .path()
+            .resolve("resources/install_ffmpeg.py", BaseDirectory::Resource)
+            .map_err(|e| format!("Script install_ffmpeg.py não encontrado no app: {:?}", e))?;
+        let transcribe_script = app
+            .path()
+            .resolve("resources/transcribe.py", BaseDirectory::Resource)
+            .ok();
+        let python_bin = resolve_python(transcribe_script.as_deref());
+        let script_path = script_path
+            .to_str()
+            .ok_or_else(|| "Path do script inválido (encoding)".to_string())?
+            .to_string();
+
+        return tokio::task::spawn_blocking(move || {
+            install_ffmpeg_blocking(&python_bin, &script_path, &install_dir)
+        })
         .await
-        .map_err(|e| format!("Erro interno: {}", e))?
+        .map_err(|e| format!("Erro interno: {}", e))?;
+    }
 }
 
+#[cfg(windows)]
+fn install_ffmpeg_windows_native(install_dir: &str) -> Result<String, String> {
+    let url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
+    let escaped_dir = install_dir.replace('\'', "''");
+    let ps_script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $tmp = Join-Path $env:TEMP ('ffmpeg-' + [guid]::NewGuid() + '.zip'); \
+         $dst = Join-Path $env:TEMP ('ffmpeg-extract-' + [guid]::NewGuid()); \
+         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
+         Invoke-WebRequest -Uri '{url}' -OutFile $tmp -UseBasicParsing; \
+         Expand-Archive -Path $tmp -DestinationPath $dst -Force; \
+         $bins = Get-ChildItem -Path $dst -Recurse -Include ffmpeg.exe,ffprobe.exe; \
+         if ($bins.Count -eq 0) {{ throw 'Binários ffmpeg/ffprobe não encontrados no zip' }}; \
+         New-Item -ItemType Directory -Force -Path '{dir}' | Out-Null; \
+         foreach ($b in $bins) {{ Copy-Item $b.FullName -Destination '{dir}' -Force }}; \
+         Remove-Item $tmp,$dst -Recurse -Force -ErrorAction SilentlyContinue",
+        url = url,
+        dir = escaped_dir
+    );
+
+    let mut cmd = Command::new("powershell");
+    suppress_console(&mut cmd);
+    let output = cmd
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps_script])
+        .output()
+        .map_err(|e| format!("Falha ao executar PowerShell: {}", e))?;
+
+    if output.status.success() {
+        return Ok("FFmpeg instalado com sucesso!".to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(format!(
+        "Falha ao baixar/instalar FFmpeg.\n\nDetalhe:\n{}",
+        stderr.lines().take(8).collect::<Vec<_>>().join("\n")
+    ))
+}
+
+#[cfg(not(windows))]
 fn install_ffmpeg_blocking(
     python_bin: &str,
     script_path: &str,
