@@ -1117,9 +1117,10 @@ Detalhe (stderr):\n{}{}",
         ));
     }
 
-    // Read from the file (Python writes there too) as the authoritative result
+    // Read from the file (Python writes there too) as the authoritative result.
+    // Usa read + from_utf8_lossy porque no Windows o Python pode gerar bytes fora de UTF-8.
     let txt_path = output_text_dir.join(format!("{}.txt", mp3_name));
-    let content = fs::read_to_string(&txt_path).map_err(|e| {
+    let raw = fs::read(&txt_path).map_err(|e| {
         format!(
             "Falha ao ler resultado da transcrição ({}): {}",
             txt_path.display(),
@@ -1127,7 +1128,7 @@ Detalhe (stderr):\n{}{}",
         )
     })?;
 
-    Ok(content)
+    Ok(String::from_utf8_lossy(&raw).into_owned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

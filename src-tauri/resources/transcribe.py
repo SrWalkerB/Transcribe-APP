@@ -29,7 +29,7 @@ print("__LANG__:%s" % info.language, flush=True)
 for segment in segments:
     line = "[%.2fs -> %.2fs] %s" % (segment.start, segment.end, segment.text)
     print("__SEG__:%.2f|%s" % (segment.end, segment.text.strip()), flush=True)
-    with open(file_name, "a") as file:
+    with open(file_name, "a", encoding="utf-8") as file:
         file.write(line + "\n")
 
 print("__DONE__", flush=True)

@@ -112,6 +112,11 @@ const translations = {
     en: "Accepted formats: MP4, MKV, AVI, MOV, WEBM",
     es: "Formatos aceptados: MP4, MKV, AVI, MOV, WEBM",
   },
+  "upload.loadingFile": {
+    "pt-BR": "Carregando vídeo...",
+    en: "Loading video...",
+    es: "Cargando video...",
+  },
   "upload.dropWarning": {
     "pt-BR": 'Use "clique para buscar" para selecionar o vídeo e transcrever (arrastar não envia o caminho do arquivo).',
     en: 'Use "click to browse" to select the video and transcribe (drag does not send the file path).',

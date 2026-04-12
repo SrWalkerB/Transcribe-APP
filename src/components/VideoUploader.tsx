@@ -37,6 +37,7 @@ interface VideoUploaderProps {
 export default function VideoUploader({ onPathSelected, isLoading, droppedFile, dragOver }: VideoUploaderProps) {
   const { t } = useLang();
   const [selected, setSelected] = useState<SelectedVideo | null>(null);
+  const [loadingFile, setLoadingFile] = useState(false);
   const [model, setModel] = useState("base");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [threads, setThreads] = useState(4);
@@ -68,6 +69,7 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
     const path = result === null || Array.isArray(result) ? null : result;
     if (path) {
       const displayName = path.replace(/^.*[/\\]/, "") || "video";
+      setLoadingFile(true);
       let duration: number | undefined;
       try {
         duration = await invoke<number>("get_video_duration", { path });
@@ -75,7 +77,7 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
         // ffprobe not available, skip duration
       }
       setSelected({ path, displayName, duration });
-
+      setLoadingFile(false);
     }
   }
 
@@ -118,7 +120,12 @@ export default function VideoUploader({ onPathSelected, isLoading, droppedFile, 
           }
         }}
       >
-        {!selected ? (
+        {loadingFile ? (
+          <div className="drop-zone__content">
+            <span className="spinner" />
+            <p className="drop-zone__label">{t("upload.loadingFile")}</p>
+          </div>
+        ) : !selected ? (
           <div className="drop-zone__content">
             <div className="drop-zone__icon">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
